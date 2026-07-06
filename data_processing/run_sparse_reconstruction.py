@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,10 +108,14 @@ def run_metric_alignment(args: argparse.Namespace, scene_input_dir: Path, experi
 def configure_3dgrut_environment(args: argparse.Namespace) -> None:
     if args.torch_cuda_arch_list:
         os.environ["TORCH_CUDA_ARCH_LIST"] = args.torch_cuda_arch_list
-    os.environ.setdefault("CC", args.cc)
-    os.environ.setdefault("CXX", args.cxx)
+    if os.name != "nt":
+        # torch cpp_extension uses MSVC (cl.exe) on Windows; gcc/g++ only apply to POSIX.
+        os.environ.setdefault("CC", args.cc)
+        os.environ.setdefault("CXX", args.cxx)
     slurm_job_id = os.environ["SLURM_JOB_ID"] if "SLURM_JOB_ID" in os.environ else os.getpid()
-    os.environ.setdefault("TORCH_EXTENSIONS_DIR", f"/tmp/torch_extensions_{slurm_job_id}")
+    os.environ.setdefault(
+        "TORCH_EXTENSIONS_DIR", str(Path(tempfile.gettempdir()) / f"torch_extensions_{slurm_job_id}")
+    )
 
 
 def train_sparse_reconstruction(
