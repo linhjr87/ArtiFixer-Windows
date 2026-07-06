@@ -96,6 +96,9 @@ def validate_evalset_args(parser: argparse.ArgumentParser, args: argparse.Namesp
     if args.render_trajectory == "trajectory" and not is_reconstructed_colmap_evalset(args.evalset):
         parser.error("--render_trajectory=trajectory is currently supported only for --evalset reconstructed_colmap")
 
+    if args.cpu_offload and args.context_parallel_size > 1:
+        parser.error("--cpu_offload cannot be combined with --context_parallel_size > 1")
+
     if (
         args.num_views is None
         and not is_reconstructed_colmap_evalset(args.evalset)
@@ -331,17 +334,22 @@ def get_output_dir(args) -> Path:
 
 def get_eval_pipe(args: argparse.Namespace, device: torch.device):
     if args.inference_pipeline == "bidirectional":
-        return (
-            get_pipe(
-                args,
-                load_pretrained_transformer_weights=False,
-                frames_per_block=None,
-                device=device,
-            )
-            .to(torch.bfloat16)
-            .to(device)
-        )
-    return get_kv_cache_pipe(args, device).to(torch.bfloat16).to(device)
+        pipe = get_pipe(
+            args,
+            load_pretrained_transformer_weights=False,
+            frames_per_block=None,
+            device=device,
+        ).to(torch.bfloat16)
+    else:
+        pipe = get_kv_cache_pipe(args, device).to(torch.bfloat16)
+
+    if args.cpu_offload:
+        # The VAE was already placed on the GPU at construction; the transformer
+        # stays in CPU RAM until accelerate offload hooks are attached in main(),
+        # after its checkpoint has been loaded. Moving the 14B transformer to the
+        # GPU first would OOM the very devices this flag exists for.
+        return pipe
+    return pipe.to(device)
 
 
 def create_context_parallel_meshes(
@@ -778,8 +786,15 @@ def process_items_with_context_parallel(
             pipe.transformer.disable_context_parallel()
 
 
-@torch.inference_mode()
 def main(args: argparse.Namespace, dataset_factory=create_dataset, output_dir_factory=get_output_dir):
+    # accelerate's CPU-offload hooks re-register parameters during forward, which
+    # torch.inference_mode forbids; fall back to torch.no_grad in that mode.
+    inference_ctx = torch.no_grad() if args.cpu_offload else torch.inference_mode()
+    with inference_ctx:
+        _run_eval(args, dataset_factory, output_dir_factory)
+
+
+def _run_eval(args: argparse.Namespace, dataset_factory=create_dataset, output_dir_factory=get_output_dir):
     rank, world_size, local_rank = init_distributed(args.distributed_timeout_minutes)
     device = torch.device(f"cuda:{local_rank}")
 
@@ -798,6 +813,13 @@ def main(args: argparse.Namespace, dataset_factory=create_dataset, output_dir_fa
 
         if rank == 0:
             print("Loaded transformer checkpoint")
+
+        if args.cpu_offload:
+            from accelerate import cpu_offload
+
+            cpu_offload(pipe.transformer, execution_device=device)
+            if rank == 0:
+                print("Transformer CPU offload enabled: weights stream from CPU RAM to the GPU per layer")
 
         dataset = dataset_factory(args, rank)
         if rank == 0:
@@ -847,6 +869,13 @@ def add_inference_args(parser: argparse.ArgumentParser) -> None:
         "--save_frame_outputs_only",
         action="store_true",
         help="Only save pred/gt/rendered PNG frames needed for metrics; skip comparison videos and diagnostic videos.",
+    )
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="Keep transformer weights in CPU RAM and stream them to the GPU layer by layer during "
+        "inference. Enables the 14B checkpoint on GPUs below ~32 GiB VRAM (e.g. a 16 GiB RTX 5060 Ti) "
+        "at reduced speed; combine with --max_neighbors_per_encode 1 on memory-constrained systems.",
     )
     parser.add_argument(
         "--distributed_timeout_minutes",
