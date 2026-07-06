@@ -21,6 +21,10 @@ COPY ./thirdparty/ ./thirdparty/
 
 WORKDIR ./thirdparty/3DGRUT-ArtiFixer/
 RUN pip install -r requirements.txt
+# Windows checkouts with core.autocrlf=true copy CRLF-terminated scripts into the
+# build context (the submodule is not covered by this repo's .gitattributes);
+# normalize to LF so bash does not choke on the carriage returns.
+RUN sed -i 's/\r$//' scripts/*.sh
 RUN bash scripts/install_slangc.sh /usr/local
 RUN pip install -e .
 
@@ -41,7 +45,7 @@ RUN pip install --pre flash-attn-4
 # downgrade to monolithic 12.6.2 which bundles the compiled bindings
 RUN pip install --force-reinstall --no-deps "cuda-python==12.6.2.post1"
 
-RUN pip install accelerate==1.13.0 diffusers==0.37.1 transformers==5.5.0 ftfy
+RUN pip install accelerate==1.13.0 diffusers==0.37.1 transformers==5.5.0 ftfy peft
 
 WORKDIR /workspace
 RUN pip install einops scipy wandb tqdm Pillow matplotlib opencv-python-headless \

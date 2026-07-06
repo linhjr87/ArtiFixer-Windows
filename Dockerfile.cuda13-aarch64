@@ -25,6 +25,9 @@ WORKDIR ./thirdparty/3DGRUT-ArtiFixer/
 RUN sed -i '/^setuptools/d; /^usd-core/d; /^slangtorch/d; /^libigl/d; /^git+.*fused-ssim/d' requirements.txt
 RUN pip install -r requirements.txt
 RUN MAX_JOBS=${FUSED_SSIM_MAX_JOBS} pip install --no-build-isolation "fused_ssim @ git+https://github.com/rahul-goel/fused-ssim@1272e21a282342e89537159e4bad508b19b34157"
+# Windows checkouts with core.autocrlf=true copy CRLF-terminated scripts into the
+# build context; normalize to LF so bash does not choke on the carriage returns.
+RUN sed -i 's/\r$//' scripts/*.sh
 # Install native aarch64 slangc (slangtorch ships x86-only binaries)
 RUN bash scripts/install_slangc.sh /usr/local
 RUN pip install -e .
@@ -43,7 +46,7 @@ RUN pip install --force-reinstall \
 # NGC 26.03 has CUDA 13.2 runtime so 13.x works natively on aarch64.
 RUN pip install --force-reinstall cuda-python==13.2.0 cuda-bindings==13.2.0
 
-RUN pip install accelerate==1.13.0 diffusers==0.37.1 transformers==5.5.0 ftfy
+RUN pip install accelerate==1.13.0 diffusers==0.37.1 transformers==5.5.0 ftfy peft
 
 WORKDIR /workspace
 RUN pip install einops scipy wandb tqdm Pillow matplotlib opencv-python-headless \
