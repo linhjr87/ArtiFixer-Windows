@@ -6,6 +6,7 @@ import gc
 import json
 import math
 import os
+import tempfile
 import warnings
 from io import BytesIO
 from pathlib import Path
@@ -23,9 +24,38 @@ from data_processing.scene_utils import (
 from diffusers.pipelines.wan.pipeline_wan import prompt_clean
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoTokenizer, Qwen3VLMoeForConditionalGeneration, Qwen3VLProcessor, UMT5EncoderModel
+from transformers import (
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+    PreTrainedModel,
+    Qwen3VLProcessor,
+    UMT5EncoderModel,
+)
 
 os.environ["HF_ENABLE_PARALLEL_LOADING"] = "YES"
+
+LARGE_CAPTIONING_MODEL_ID = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+SMALL_CAPTIONING_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+# Below this VRAM budget the 30B MoE model must offload weights to disk on every
+# generate() call, which makes captioning orders of magnitude slower than the
+# dense 8B model running mostly on-GPU.
+LARGE_CAPTIONING_MODEL_MIN_VRAM_GIB = 40.0
+
+
+def resolve_captioning_model_id(model_id: str | None) -> str:
+    """Resolve 'auto' to a captioning model that fits the available GPU memory."""
+    if model_id is not None and model_id != "auto":
+        return model_id
+    if torch.cuda.is_available():
+        total_gib = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        if total_gib >= LARGE_CAPTIONING_MODEL_MIN_VRAM_GIB:
+            return LARGE_CAPTIONING_MODEL_ID
+        print(
+            f"GPU has {total_gib:.0f} GiB VRAM (< {LARGE_CAPTIONING_MODEL_MIN_VRAM_GIB:.0f} GiB); "
+            f"selecting {SMALL_CAPTIONING_MODEL_ID} for captioning. "
+            f"Pass --captioning_model_id {LARGE_CAPTIONING_MODEL_ID} to override."
+        )
+    return SMALL_CAPTIONING_MODEL_ID
 
 
 IMAGE_PROMPT = """
@@ -72,7 +102,7 @@ VIDEO_PROMPT = """
 def generate_caption(
     image_paths: np.ndarray,
     fps: int,
-    model: Qwen3VLMoeForConditionalGeneration,
+    model: PreTrainedModel,
     processor: Qwen3VLProcessor,
 ) -> str:
     if len(image_paths) == 1:
@@ -153,7 +183,7 @@ def generate_caption_hdf5(
     frame_stride: int = 1,
     dataset_fps: int = 60,
     dataset_downsample_factor: int = 4,
-    captioning_model_id: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    captioning_model_id: str = "auto",
     captioning_attn_implementation: str | None = None,
     text_encoder_model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     text_encoder_max_sequence_length: int = 512,
@@ -233,11 +263,18 @@ def generate_caption_hdf5(
 
     images = np.stack(images)
 
-    caption_model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+    captioning_model_id = resolve_captioning_model_id(captioning_model_id)
+    # AutoModelForImageTextToText resolves the concrete architecture (dense or MoE)
+    # from the checkpoint config, so both Qwen3-VL variants load with the same code.
+    # offload_folder lets accelerate spill weights to disk when the model does not
+    # fit in VRAM + CPU RAM; mkdtemp (not a self-cleaning context) because the
+    # folder must outlive from_pretrained() for the model's whole lifetime.
+    caption_model = AutoModelForImageTextToText.from_pretrained(
         captioning_model_id,
         dtype="auto",
         device_map="auto",
         attn_implementation=captioning_attn_implementation,
+        offload_folder=tempfile.mkdtemp(prefix="artifixer_captioning_offload_"),
     )
 
     processor = Qwen3VLProcessor.from_pretrained(captioning_model_id)
@@ -312,7 +349,13 @@ if __name__ == "__main__":
     parser.add_argument("--frame_stride", type=int, default=1)
     parser.add_argument("--dataset_fps", type=int, default=60)
     parser.add_argument("--dataset_downsample_factor", type=int, default=4)
-    parser.add_argument("--captioning_model_id", type=str, default="Qwen/Qwen3-VL-30B-A3B-Instruct")
+    parser.add_argument(
+        "--captioning_model_id",
+        type=str,
+        default="auto",
+        help="Captioning VLM to use. 'auto' selects Qwen3-VL-30B-A3B on GPUs with enough VRAM "
+        "and falls back to Qwen3-VL-8B on smaller GPUs (e.g. 16 GiB).",
+    )
     parser.add_argument("--captioning_attn_implementation", type=str, default=None)
     parser.add_argument("--text_encoder_model_id", default="Wan-AI/Wan2.1-T2V-1.3B-Diffusers", type=str)
     parser.add_argument("--text_encoder_max_sequence_length", default=512, type=int)

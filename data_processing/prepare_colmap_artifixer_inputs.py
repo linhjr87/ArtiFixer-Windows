@@ -51,7 +51,9 @@ from data_processing.threedgrut_training import DEFAULT_THREEDGRUT_CONFIG_DIR, t
 
 DEFAULT_THREEDGRUT_CONFIG = "apps/colmap_3dgut_sparse_mcmc"
 DEFAULT_TEXT_ENCODER_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-DEFAULT_CAPTIONING_MODEL_ID = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+# "auto" resolves to Qwen3-VL-30B-A3B on GPUs with enough VRAM and to Qwen3-VL-8B
+# on smaller GPUs (see data_processing.captioning.generate_captions).
+DEFAULT_CAPTIONING_MODEL_ID = "auto"
 DEFAULT_CAPTION_FILENAME = "caption.h5"
 DEFAULT_RECON_SUBDIR = "reconstruction"
 DEFAULT_CAMERA_CONDITIONING_SCALE = 0.01

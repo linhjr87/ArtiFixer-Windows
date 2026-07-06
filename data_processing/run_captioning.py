@@ -42,7 +42,7 @@ def generate_for_scene(args: argparse.Namespace, scene_path: Path) -> None:
             num_frames=args.num_frames,
             frame_stride=frame_stride,
             revisit=revisit,
-            reverse=reverse,
+            reverse_frames=reverse,
             captioning_model_id=args.captioning_model_id,
             captioning_attn_implementation=args.captioning_attn_implementation,
             text_encoder_model_id=args.text_encoder_model_id,
@@ -62,7 +62,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include_revisit", action="store_true", help="Also generate *_revisit prompt files")
     parser.add_argument("--hf_cache_dir", type=Path)
     parser.add_argument("--hf_hub_offline", action="store_true", help="Use only already-cached Hugging Face assets")
-    parser.add_argument("--captioning_model_id", default="Qwen/Qwen3-VL-30B-A3B-Instruct")
+    parser.add_argument(
+        "--captioning_model_id",
+        default="auto",
+        help="Captioning VLM to use. 'auto' selects Qwen3-VL-30B-A3B on GPUs with enough VRAM "
+        "and falls back to Qwen3-VL-8B on smaller GPUs (e.g. 16 GiB).",
+    )
     parser.add_argument("--captioning_attn_implementation")
     parser.add_argument("--text_encoder_model_id", default="Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
     args = parser.parse_args()
