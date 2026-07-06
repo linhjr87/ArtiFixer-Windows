@@ -1,0 +1,16 @@
+# Shell scripts must keep LF endings: they run inside Linux Docker build
+# containers, and bash treats a CR as part of the command (Windows checkouts
+# with core.autocrlf=true would otherwise break the image build).
+*.sh text eol=lf
+Dockerfile* text eol=lf
+
+# PowerShell scripts are consumed on Windows.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets.
+*.pt binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.h5 binary
