@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from model_training.utils.lora_utils import add_lora_opts
+
 
 DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
 
@@ -64,7 +66,16 @@ def create_export_transformer(args: Namespace):
     from model_training.utils.train_utils import get_kv_cache_pipe
 
     pipe = get_kv_cache_pipe(args, device="cpu")
-    return pipe.transformer
+    transformer = pipe.transformer
+    if getattr(args, "lora_rank", 0) > 0:
+        # Recreate the same peft wrapping used during training so the DCP
+        # checkpoint (base + adapter keys) loads; merged after loading.
+        from peft import get_peft_model
+
+        from model_training.utils.lora_utils import build_lora_config
+
+        transformer = get_peft_model(transformer, build_lora_config(args))
+    return transformer
 
 
 def export_checkpoint(
@@ -89,6 +100,11 @@ def export_checkpoint(
 
     transformer = transformer_factory(args)
     dcp_loader(transformer, args.checkpoint_dir)
+
+    if getattr(args, "lora_rank", 0) > 0 and hasattr(transformer, "merge_and_unload"):
+        # Fold the LoRA adapters into the base weights and restore the original
+        # module tree, so the exported .pt loads directly via --checkpoint_pt.
+        transformer = transformer.merge_and_unload()
 
     args.output_pt.parent.mkdir(parents=True, exist_ok=True)
     torch_module.save(_state_dict_to_cpu(transformer.state_dict(), torch_module=torch_module), args.output_pt)
@@ -121,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no_gradient_checkpointing", dest="gradient_checkpointing", action="store_false")
     parser.add_argument("--checkpoint_every_n_blocks", default=1, type=int)
     parser.add_argument("--attention_backend", default=None, type=str)
+    add_lora_opts(parser)
     parser.add_argument("--run_id", required=True, type=str)
     parser.add_argument("--checkpoint", required=True, type=int)
     parser.add_argument("--slot", required=True, type=str)

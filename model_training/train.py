@@ -6,7 +6,9 @@ from pathlib import Path
 
 import torch
 
+from model_eval.checkpoint_loading import load_model_weights_from_pt
 from model_training.trainers.trainer import Trainer
+from model_training.utils.lora_utils import add_lora_opts, build_lora_config
 from model_training.utils.train_utils import (
     ResumeState,
     barrier_if_distributed,
@@ -24,13 +26,43 @@ from model_training.utils.train_utils import (
 def main(args: argparse.Namespace):
     run_id, should_resume = get_run_id_and_should_resume(args)
     accelerator = get_accelerator(args, run_id)
-    pipe = get_pipe(args, not should_resume, None, accelerator.device)
+    load_base_weights = not should_resume and args.init_checkpoint_pt is None
+    pipe = get_pipe(args, load_base_weights, None, accelerator.device)
 
-    optimizer = torch.optim.AdamW(
-        pipe.transformer.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
+    if args.init_checkpoint_pt is not None and not should_resume:
+        # Fine-tune from a released single-file checkpoint (e.g. artifixer-14b.pt)
+        # instead of the Wan base weights. Must happen before accelerator.prepare()
+        # so FSDP shards the already-loaded weights.
+        load_model_weights_from_pt(pipe.transformer, args.init_checkpoint_pt)
+        accelerator.print(f"Initialized transformer from {args.init_checkpoint_pt}")
+
+    if args.lora_rank > 0:
+        # Freeze the base weights and train low-rank adapters only. Must wrap
+        # before accelerator.prepare() so FSDP shards the adapted module tree;
+        # FSDP2 handles mixed frozen/trainable parameters. Export a merged
+        # inference checkpoint afterwards with model_eval.export_checkpoint_pt
+        # using the same --lora_* values.
+        from peft import get_peft_model
+
+        pipe.transformer = get_peft_model(pipe.transformer, build_lora_config(args))
+        if accelerator.is_main_process:
+            pipe.transformer.print_trainable_parameters()
+
+    trainable_params = [p for p in pipe.transformer.parameters() if p.requires_grad]
+    if args.optimizer == "adamw8bit":
+        import bitsandbytes as bnb
+
+        optimizer = bnb.optim.AdamW8bit(
+            trainable_params,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
 
     train_dataloader = get_train_dataloader(args, accelerator, None)
@@ -73,7 +105,22 @@ if __name__ == "__main__":
     parser = get_common_opts()
 
     parser.add_argument("--project_dir", required=True, type=Path)
+    parser.add_argument(
+        "--init_checkpoint_pt",
+        type=Path,
+        default=None,
+        help="Optional single-file transformer state dict (e.g. the released artifixer-14b.pt) "
+        "to fine-tune from instead of the Wan base weights. Ignored when resuming.",
+    )
 
+    add_lora_opts(parser)
+    parser.add_argument(
+        "--optimizer",
+        default="adamw",
+        choices=["adamw", "adamw8bit"],
+        help="adamw8bit (bitsandbytes) quarters the optimizer-state memory — useful for "
+        "single-GPU fine-tunes on memory-constrained consumer cards.",
+    )
     parser.add_argument("--max_iterations", default=25000, type=int)
     parser.add_argument("--learning_rate", default=1e-5, type=float)
     parser.add_argument("--weight_decay", default=1e-2, type=float)
