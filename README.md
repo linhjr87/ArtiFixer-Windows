@@ -49,6 +49,10 @@ This project will only accept contributions under Apache-2.0. See [CONTRIBUTING.
 
 ## Setup
 
+> **Windows users:** see [README_WINDOWS.md](README_WINDOWS.md) for a Windows-specific
+> setup (Docker Desktop/WSL2 and native conda) tuned for 16 GB consumer GPUs such as the
+> RTX 5060 Ti, including the `--cpu_offload` inference mode.
+
 Clone the repository with its ArtiFixer-compatible 3DGRUT submodule:
 
 ```bash
